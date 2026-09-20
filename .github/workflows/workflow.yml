@@ -1,0 +1,155 @@
+name: "chrisley-ejs-build"
+on:
+  workflow_dispatch:
+    inputs:
+      rt_npm_remote_repo_id:
+        required: true
+        type: string
+        default: "chrisley-npm-virtual-dev"
+        description: "Artifactory Resolve Repository Name"
+      rt_npm_local_repo_id:
+          required: true
+          type: string
+          default: "chrisley-npm-local-dev"
+          description: "Artifactory Deploy Repository Name"
+      rt_docker_repo:
+        required: true
+        type: string
+        default: "chrisley-docker-local-dev"
+        description: "Artifactory Docker repository"
+      docker_image_name:
+        required: true
+        type: string
+        default: "ejs"
+        description: "Docker Image name"
+      xr_enable_scan:
+        required: true
+        type: string
+        default: "true"
+        description: "Scan with Xray"
+      xr_override_fail_build:
+        required: true
+        type: string
+        default: "false"
+        description: "Set to false to ignore the fail build coming from Xray (exit code 3)"
+permissions:
+  actions: read           # for detecting the Github Actions environment
+  id-token: write         # for creating OIDC tokens for signing
+  packages: write         # for uploading attestations
+  contents: read          # read the contents permission
+  security-events: write  # for uploading code scanning
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_REPO: ${{ github.event.inputs.rt_docker_repo }}
+      IMAGE_NAME: ${{ github.event.inputs.docker_image_name }}
+    # Here we install all the tools : docker buildx, QEMU, JDK 11, JFrog CLI
+    steps:
+      - name: Print Inputs
+        run: echo "${{ toJSON(github.event.inputs) }}"
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+            node-version: 18      
+      - name: Setup JFrog CLI 
+        uses: jfrog/setup-jfrog-cli@v4
+        id: setup-cli
+        env:
+          JF_URL: https://${{ vars.JF_URL }}/
+          JF_PROJECT: ${{ vars.JF_PROJECT }}
+        with:
+            oidc-provider-name: christophl-github
+            oidc-audience: christophl-audience
+            disable-auto-build-publish: false
+            disable-job-summary: false
+      - name: Curation Audit 
+        run: |
+          jf npmc --repo-resolve ${{ github.event.inputs.rt_npm_remote_repo_id }} --repo-deploy ${{ github.event.inputs.rt_npm_local_repo_id }}
+          npm i --omit dev
+          jf curation-audit | grep "Policy violations" && exit 3 || exit 0
+      - name: NPM Audit 
+        run: |
+          # export JFROG_CLI_LOG_LEVEL="DEBUG"
+          jf npmc --repo-resolve ${{ github.event.inputs.rt_npm_remote_repo_id }} --repo-deploy ${{ github.event.inputs.rt_npm_local_repo_id }}
+          npm i --omit dev
+          jf npm version 1.0.${{ env.JFROG_CLI_BUILD_NUMBER }} --git-tag-version false
+          jf npm i --omit dev --loglevel verbose         
+          if [ ${{ github.event.inputs.xr_enable_scan }} == 'true' ]; then
+          	echo "Execute Xray scanning ..."
+          	jf audit --npm --fail=${{ github.event.inputs.xr_override_fail_build }} --project  ${{ vars.JF_PROJECT }}            
+          else
+          	echo "Skip Xray scanning!!!"
+          fi
+          jf npm publish
+      - name: Docker Authenticate
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.JF_URL }}
+          username: ${{ steps.setup-cli.outputs.oidc-user }}
+          password: ${{ steps.setup-cli.outputs.oidc-token }}
+      - name: Docker Build and Push
+        uses: docker/build-push-action@v5
+        id: build
+        with:
+          push: true
+          tags: ${{ vars.JF_URL }}/${{ env.DOCKER_REPO }}/${{ env.IMAGE_NAME }}:${{ github.run_number }}
+          provenance: false      
+      - name: Docker scan
+        run: |
+          jf docker pull ${{ vars.JF_URL }}/${{ env.DOCKER_REPO }}/${{ env.IMAGE_NAME }}:${{ github.run_number }}
+          jf docker scan ${{ vars.JF_URL }}/${{ env.DOCKER_REPO }}/${{ env.IMAGE_NAME }}:${{ github.run_number }} --fail=false --vuln
+      - name: Docker Add Package to Build
+        run: |  
+           echo "${{ vars.JF_URL }}/${{ env.DOCKER_REPO }}/${{ env.IMAGE_NAME }}:${{ github.run_number }}@${{ steps.build.outputs.digest }}" > metadata.json
+           jf rt build-docker-create ${{ env.DOCKER_REPO }} --image-file metadata.json      
+      - name: Publish Build Info
+        run: |
+          jf rt build-collect-env
+          jf rt build-add-git
+          jf rt build-publish     
+      - name: Build Scan
+        run: |            
+          jf build-scan --vuln=true --fail=false --project=${{ vars.JF_PROJECT }}
+#      - name: Release Bundle Create and promote to DEV  
+#        run: |            
+#          jf rbc --spec=./build.info --signing-key=jfrog-christophl-rb ${{ env.JFROG_CLI_BUILD_NAME }} 0.1-${{ env.JFROG_CLI_BUILD_NUMBER }}
+#          jf rbp --signing-key=jfrog-christophl-rb ${{ env.JFROG_CLI_BUILD_NAME }} 0.1-${{ env.JFROG_CLI_BUILD_NUMBER }} DEV
+
+# Release Management - Create Evidence and a Release Bundle
+      - name: Evidence on docker
+        run: |
+          echo '{ "actor": "${{ github.actor }}", "date": "'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'" }' > sign.json
+          jf evd create --project ${{ vars.JF_PROJECT }} --package-name ${{ env.IMAGE_NAME }} \
+          --package-version ${{ github.run_number }} --package-repo-name ${{ env.DOCKER_REPO }} \
+          --key "${{ secrets.PRIVATE_KEY }}" --key-alias ${{ secrets.KEY_ALIAS }} \
+          --predicate ./sign.json --predicate-type https://jfrog.com/evidence/signature/v1 
+          echo '🔎 Evidence attached: `signature` 🔏 ' 
+
+      - name: Collecting Information from Git
+        run: jf rt build-add-git
+
+      - name: Collecting Environment Variables
+        run: jf rt build-collect-env
+
+      - name: Publish build info
+        run: jfrog rt build-publish
+        
+      - name: Sign build evidence
+        run: |
+          echo '{ "actor": "${{ github.actor }}", "date": "'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'" }' > sign.json
+          jf evd create --project ${{ vars.JF_PROJECT }} --build-name ${{ github.workflow }} --build-number ${{ github.run_number }} \
+            --predicate ./sign.json --predicate-type https://jfrog.com/evidence/build-signature/v1 \
+            --key "${{ secrets.PRIVATE_KEY }}"  --key-alias ${{ secrets.KEY_ALIAS }}
+          echo '🔎 Evidence attached: `build-signature` 🔏 ' >> $GITHUB_STEP_SUMMARY
+
+      - name: Create release bundle
+        run: |
+          jf rbc --spec=./build.info --project ${{ vars.JF_PROJECT }} --sync=true --signing-key=${{ secrets.RB_KEY }} ${{ env.JFROG_CLI_BUILD_NAME }} ${{ env.JFROG_CLI_BUILD_NUMBER }}
+          VER_LINK=${{ vars.ARTIFACTORY_URL }}'/ui/artifactory/lifecycle/?bundleName='${{ github.actor }}-evidence-training'&bundleToFlash='${{ github.actor }}'&releaseBundleVersion='${{ github.run_number }}'&repositoryKey=release-bundles-v2&activeKanbanTab=promotion'
+          echo '📦 Release bundle ['${{ github.actor }}:${{ github.run_number }}']('${VER_LINK}') created' >> $GITHUB_STEP_SUMMARY
+   

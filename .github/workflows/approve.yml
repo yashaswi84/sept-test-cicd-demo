@@ -1,0 +1,35 @@
+name: christophl--Docker-approve-with-evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      rb-version:
+        description: 'Release bundle version'     
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  Docker-build-with-evidence:
+    runs-on: ubuntu-latest
+    env:
+      REPO_NAME: christophl-docker-dev
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+    
+      - name: Install jfrog cli
+        uses: jfrog/setup-jfrog-cli@v4
+        env:
+          JF_URL: ${{ vars.ARTIFACTORY_URL }}
+          JF_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+
+      - name: Approve release-bundle
+        run: |
+          echo '{ "actor": "${{ github.actor }}", "date": "'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'", "approved": "true" }' > rbv2_approval_evidence.json
+          jf evd create --key "${{ secrets.PRIVATE_KEY }}" --key-alias ${{ secrets.KEY_ALIAS }} \
+            --release-bundle ${{ github.actor }}-evidence-training --release-bundle-version ${{ inputs.rb-version }} \
+            --predicate ./rbv2_approval_evidence.json --predicate-type https://jfrog.com/evidence/approval/v1
+          echo 'Approval of Release bundle ${{ github.actor }}-evidence-training':'${{ inputs.rb-version }} succeded' >> $GITHUB_STEP_SUMMARY

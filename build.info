@@ -1,0 +1,9 @@
+{
+  "files": [
+    {
+      "build": "github-ejs-build",
+      "includeDeps": "true",
+      "project": "chrisley"
+    }
+  ]
+}

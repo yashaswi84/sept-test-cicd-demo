@@ -1,0 +1,21 @@
+{
+  "name": "sept-test-froghome",
+  "version": "1.0.37-septtest.1",
+  "description": "",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "davidro@jfrog.com",
+  "license": "MIT",
+  "dependencies": {
+    "call-bind-apply-helpers": "1.0.1",
+    "editor.md": "1.5.0",
+    "ejs": "3.1.6",
+    "express": "4.18.2",
+    "lodash": "4.17.0",
+    "pm2": "5.3.0",
+    "protobufjs": "6.11.2",
+    "vm2": "3.9.4"
+  }
+}

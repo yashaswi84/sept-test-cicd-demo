@@ -1,0 +1,11 @@
+{
+    "build": { "dockerfile": "Dockerfile" },
+
+    "customizations": {
+      "vscode": {
+        "extensions": ["JFrog.jfrog-vscode-extension"]
+      }
+    },
+
+    "forwardPorts": [3000]
+}

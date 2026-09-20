@@ -1,0 +1,54 @@
+name: christophl--Promote-to-qa
+on:
+  workflow_dispatch:
+    inputs:
+      rb-version:
+        description: 'Release bundle version'     
+        required: true
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  Promote-to-qa-and-test:
+    runs-on: ubuntu-latest
+    steps:
+    
+      - name: Checkout
+        uses: actions/checkout@v4
+    
+      - name: Install jfrog cli
+        uses: jfrog/setup-jfrog-cli@v4
+        env:
+          JF_URL: ${{ vars.ARTIFACTORY_URL }}
+          JF_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+
+      - name: Install OPA
+        run: |
+          curl -L -o opa https://openpolicyagent.org/downloads/latest/opa_linux_amd64
+          chmod +x opa
+          sudo mv opa /usr/local/bin/
+
+      - name: Call GraphQL
+        run: |
+          ./scripts/graphql.sh ${{ vars.ARTIFACTORY_URL }} ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }} release-bundles-v2 ${{ github.actor }}-evidence-training ${{ inputs.rb-version }}
+          cat evidence_graph.json
+
+      - name: Run policy
+        id: run_policy
+        run: |
+          opa eval --input ./evidence_graph.json --data policy/policy.rego "data.policy.output"
+          RESULT=$(opa eval --input ./evidence_graph.json --data policy/policy.rego "data.policy.output" | jq '.result[0].expressions[0].value.approved')
+          echo "RESULT=${RESULT}" >> $GITHUB_ENV
+
+      - name: Promote to Test
+        run: |
+          if [ "${{ env.RESULT }}" == "true" ]; then
+            jf release-bundle-promote ${{ github.actor }}-evidence-training ${{ inputs.rb-version }} QA --signing-key ${{ secrets.RB_KEY }} --sync=true
+            echo "🚀 Succesfully promoted to \`QA\` environemnt" >> $GITHUB_STEP_SUMMARY
+          else
+            opa eval --input ./evidence_graph.json --data policy/policy.rego "data.policy.output" | jq '.result[0].expressions[0].value'
+            echo "Fail promotion policy check" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          
